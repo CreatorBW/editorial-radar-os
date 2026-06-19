@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+editorial_radar.db
+.streamlit/secrets.toml
+.DS_Store
