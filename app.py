@@ -23,6 +23,7 @@ st.set_page_config(page_title=APP_NAME, page_icon="📰", layout="wide")
 DB_PATH = os.environ.get("EDITORIAL_RADAR_DB", DEFAULT_DB_PATH)
 
 
+@st.cache_resource(show_spinner=False)
 def get_conn():
     conn = connect(DB_PATH)
     init_db(conn)
@@ -118,7 +119,7 @@ def load_clusters(desk: str = "All", confidence: str = "All", min_score: float =
     return rows(conn, query, params)
 
 
-def render_cluster_card(cl: dict, compact: bool = False) -> None:
+def render_cluster_card(cl: dict, compact: bool = False, key_prefix: str = "card") -> None:
     priority = priority_badge(float(cl["opportunity_score"]), cl["confidence_level"])
     with st.container(border=True):
         top_cols = st.columns([5, 1, 1, 1])
@@ -153,20 +154,20 @@ def render_cluster_card(cl: dict, compact: bool = False) -> None:
             render_evidence(int(cl["id"]))
 
         action_cols = st.columns(5)
-        if action_cols[0].button("Open brief", key=f"brief_{cl['id']}"):
+        if action_cols[0].button("Open brief", key=f"{key_prefix}_brief_{cl['id']}"):
             st.session_state["selected_cluster_id"] = int(cl["id"])
-            st.session_state["page"] = "Brief Builder"
+            st.session_state["page"] = "Briefs"
             st.rerun()
-        if action_cols[1].button("Archive matches", key=f"archive_{cl['id']}"):
+        if action_cols[1].button("Archive matches", key=f"{key_prefix}_archive_{cl['id']}"):
             st.session_state["selected_cluster_id"] = int(cl["id"])
-            st.session_state["page"] = "Archive Matches"
+            st.session_state["page"] = "Archive"
             st.rerun()
-        if action_cols[2].button("Keywords", key=f"keywords_{cl['id']}"):
+        if action_cols[2].button("Keywords", key=f"{key_prefix}_keywords_{cl['id']}"):
             st.session_state["selected_topic"] = cl["title"]
             st.session_state["page"] = "Keyword Lab"
             st.rerun()
         with action_cols[3]:
-            if st.button("Useful", key=f"useful_{cl['id']}"):
+            if st.button("Useful", key=f"{key_prefix}_useful_{cl['id']}"):
                 conn.execute(
                     "INSERT INTO feedback(cluster_id, rating, comment, created_at) VALUES(?,?,?,?)",
                     (cl["id"], "useful", "Marked from card", utcnow_iso()),
@@ -174,7 +175,7 @@ def render_cluster_card(cl: dict, compact: bool = False) -> None:
                 conn.commit()
                 st.success("Feedback saved")
         with action_cols[4]:
-            if st.button("Watch", key=f"watch_{cl['id']}"):
+            if st.button("Watch", key=f"{key_prefix}_watch_{cl['id']}"):
                 conn.execute(
                     "INSERT INTO feedback(cluster_id, rating, comment, action_taken, created_at) VALUES(?,?,?,?,?)",
                     (cl["id"], "watch", "Added to watchlist concept", "watch", utcnow_iso()),
@@ -281,23 +282,23 @@ def page_radar() -> None:
     tab1, tab2, tab3, tab4 = st.tabs(["Best Now", "Archive Ready", "Needs Watch", "All Topics"])
     with tab1:
         st.subheader("Best opportunities now")
-        for cl in clusters[:6]:
-            render_cluster_card(cl)
+        for idx, cl in enumerate(clusters[:6]):
+            render_cluster_card(cl, key_prefix=f"best_{idx}")
     with tab2:
         st.subheader("Topics with archive matches")
         if not archive:
             st.info("No archive matches yet. Upload archive CSV from Archive or load demo.")
-        for cl in archive[:8]:
-            render_cluster_card(cl)
+        for idx, cl in enumerate(archive[:8]):
+            render_cluster_card(cl, key_prefix=f"archive_ready_{idx}")
     with tab3:
         st.subheader("Developing / weak signals")
         if not watch:
             st.success("No weak watch items currently shown.")
-        for cl in watch[:8]:
-            render_cluster_card(cl)
+        for idx, cl in enumerate(watch[:8]):
+            render_cluster_card(cl, key_prefix=f"watch_tab_{idx}")
     with tab4:
-        for cl in clusters[:20]:
-            render_cluster_card(cl, compact=True)
+        for idx, cl in enumerate(clusters[:20]):
+            render_cluster_card(cl, compact=True, key_prefix=f"all_{idx}")
 
 
 def page_intent_search() -> None:
@@ -357,8 +358,8 @@ def page_intent_search() -> None:
             st.success("This has enough collected evidence for editorial consideration, subject to manual source verification.")
 
     st.markdown("### Matching editorial cards")
-    for cl in results:
-        render_cluster_card(cl)
+    for idx, cl in enumerate(results):
+        render_cluster_card(cl, key_prefix=f"intent_{idx}")
 
 
 def page_story_opportunities() -> None:
@@ -370,8 +371,8 @@ def page_story_opportunities() -> None:
     min_score = c3.slider("Minimum opportunity score", 0, 100, 0)
     clusters = load_clusters(desk=desk, confidence=confidence, min_score=min_score)
     st.caption(f"Showing {len(clusters)} source-backed opportunities.")
-    for cl in clusters:
-        render_cluster_card(cl)
+    for idx, cl in enumerate(clusters):
+        render_cluster_card(cl, key_prefix=f"story_{idx}")
 
 
 def page_archive_matches() -> None:
@@ -392,7 +393,7 @@ def page_archive_matches() -> None:
     label = st.selectbox("Select topic", list(options.keys()), index=list(options.keys()).index(selected_label) if selected_label else 0)
     cluster_id = options[label]
     cl = cluster_detail(conn, cluster_id)
-    render_cluster_card(cl, compact=True)
+    render_cluster_card(cl, compact=True, key_prefix=f"selected_{cluster_id}")
 
     st.subheader("Matched archive assets")
     if not cl["archive_matches"]:

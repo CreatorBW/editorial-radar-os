@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, TypeVar
+
+T = TypeVar("T")
 
 SCHEMA = """
-PRAGMA journal_mode=WAL;
-
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -106,46 +107,102 @@ CREATE TABLE IF NOT EXISTS digest_runs (
 """
 
 
+def _retry_locked(fn: Callable[[], T], attempts: int = 6) -> T:
+    """Retry briefly when SQLite is locked by another Streamlit rerun/session."""
+    delay = 0.2
+    last_exc: sqlite3.OperationalError | None = None
+
+    for _ in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            last_exc = exc
+            time.sleep(delay)
+            delay *= 1.6
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("SQLite retry failed without captured exception")
+
+
 def connect(db_path: str | Path = "editorial_radar.db") -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    path = Path(db_path)
+    if path.parent and str(path.parent) not in {"", "."}:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(
+        str(path),
+        timeout=30.0,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
+
+    # Make SQLite more tolerant of Streamlit reruns/concurrent sessions.
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
-    conn.commit()
+    def _run() -> None:
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+    _retry_locked(_run)
 
 
 def rows(conn: sqlite3.Connection, query: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
-    cur = conn.execute(query, tuple(params))
-    return [dict(r) for r in cur.fetchall()]
+    def _run() -> list[dict[str, Any]]:
+        cur = conn.execute(query, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+    return _retry_locked(_run)
 
 
 def one(conn: sqlite3.Connection, query: str, params: Iterable[Any] = ()) -> dict[str, Any] | None:
-    cur = conn.execute(query, tuple(params))
-    r = cur.fetchone()
-    return dict(r) if r else None
+    def _run() -> dict[str, Any] | None:
+        cur = conn.execute(query, tuple(params))
+        r = cur.fetchone()
+        return dict(r) if r else None
+
+    return _retry_locked(_run)
 
 
 def execute(conn: sqlite3.Connection, query: str, params: Iterable[Any] = ()) -> int:
-    cur = conn.execute(query, tuple(params))
-    conn.commit()
-    return int(cur.lastrowid or 0)
+    def _run() -> int:
+        cur = conn.execute(query, tuple(params))
+        conn.commit()
+        return int(cur.lastrowid or 0)
+
+    return _retry_locked(_run)
 
 
-def upsert_source(conn: sqlite3.Connection, name: str, type_: str = "rss", url: str | None = None,
-                  credibility_tier: str = "standard", active: bool = True) -> None:
-    conn.execute(
-        """
-        INSERT INTO sources(name, type, url, credibility_tier, active)
-        VALUES(?,?,?,?,?)
-        ON CONFLICT(name) DO UPDATE SET
-          type=excluded.type,
-          url=excluded.url,
-          credibility_tier=excluded.credibility_tier,
-          active=excluded.active
-        """,
-        (name, type_, url, credibility_tier, 1 if active else 0),
-    )
-    conn.commit()
+def upsert_source(
+    conn: sqlite3.Connection,
+    name: str,
+    type_: str = "rss",
+    url: str | None = None,
+    credibility_tier: str = "standard",
+    active: bool = True,
+) -> None:
+    def _run() -> None:
+        conn.execute(
+            """
+            INSERT INTO sources(name, type, url, credibility_tier, active)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(name) DO UPDATE SET
+              type=excluded.type,
+              url=excluded.url,
+              credibility_tier=excluded.credibility_tier,
+              active=excluded.active
+            """,
+            (name, type_, url, credibility_tier, 1 if active else 0),
+        )
+        conn.commit()
+
+    _retry_locked(_run)
