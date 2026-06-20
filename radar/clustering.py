@@ -60,6 +60,21 @@ def _can_join_cluster(item: dict, sig: set[str], ents: set[str], cluster: dict) 
     return False, score
 
 
+def _clear_rebuild_tables(conn: sqlite3.Connection) -> None:
+    """Clear derived cluster tables in FK-safe order.
+
+    Why feedback is deleted here:
+    topic_clusters are rebuilt from scratch on each refresh, so old cluster IDs are no longer stable.
+    Keeping feedback attached to old cluster IDs causes FOREIGN KEY failures and stale feedback.
+    A later production version should use stable cluster fingerprints instead of autoincrement IDs.
+    """
+    conn.execute("DELETE FROM feedback")
+    conn.execute("DELETE FROM cluster_items")
+    conn.execute("DELETE FROM archive_matches")
+    conn.execute("DELETE FROM topic_clusters")
+    conn.commit()
+
+
 def rebuild_clusters(conn: sqlite3.Connection, max_items: int = 500) -> int:
     items = rows(
         conn,
@@ -70,9 +85,8 @@ def rebuild_clusters(conn: sqlite3.Connection, max_items: int = 500) -> int:
         """,
         (max_items,),
     )
-    conn.execute("DELETE FROM cluster_items")
-    conn.execute("DELETE FROM topic_clusters")
-    conn.commit()
+
+    _clear_rebuild_tables(conn)
 
     clusters: list[dict] = []
     for item in items:
